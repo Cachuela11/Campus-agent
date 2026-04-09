@@ -1,12 +1,12 @@
 # Campus Agent
 
-基于 LangGraph 的校园智能问答系统，采用**硬编码拓扑工作流**架构（Harness Loop），在 Plan-Execute-Reflect-Report 固定拓扑中集成 **GraphRAG** 混合检索能力。
+基于 LangGraph 开发的校园智能问答系统，采用**硬编码工作流**架构，在 Plan-Execute-Reflect-Report 固定拓扑中集成 **GraphRAG** 三路混合检索能力。
 
 ## 架构
 
-### Harness Loop 工作流拓扑
+### 工作流拓扑
 
-本系统是一个**硬编码拓扑工作流智能体**，而非多智能体系统。所有节点的调度逻辑、执行顺序与条件路由均在编译期静态确定，由 LangGraph Harness 驱动循环执行。各节点是工作流中具有特定职责的处理单元，而非自主决策的独立 Agent。
+本系统是一个**具有复合工作流的单智能体**，而非多智能体系统。所有节点的调度逻辑、执行顺序与条件路由均在编译期静态确定，由 LangGraph 架构编码驱动循环执行。各节点是工作流中具有特定职责的处理单元，而非自主决策的独立 Agent。
 
 ```mermaid
 flowchart LR
@@ -163,7 +163,6 @@ class AgentState(TypedDict):
     long_term_memory: dict      # 跨会话持久化知识
     response: str               # 最终回答
     needs_revision: bool        # Reflector 回退信号
-    # ── GraphRAG 扩展 ──
     use_graph: bool             # 是否启用图检索路径
     graph_context: list[dict]   # 图路径召回的结构化上下文
     kg_entities: list[str]      # 识别出的关键实体
