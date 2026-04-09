@@ -71,8 +71,9 @@ def reflector_node(state: dict) -> dict:
     }
 
     if needs_revision:
-        # 回退到第一步重新执行
+        # 回退到第一步重新执行，同时清除图谱上下文避免旧数据污染
         update["current_step"] = 0
         update["steps_results"] = []
+        update["graph_context"] = []
 
     return update

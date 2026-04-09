@@ -37,10 +37,10 @@ class AgentState(TypedDict):
     # 当前正在执行的步骤索引
     current_step: int
 
-    # 每步执行结果 [{step, result, sources}, ...]
+    # 每步执行结果 [{step, result, evidence_chain}, ...]
     steps_results: list[dict]
 
-    # 证据链 [{content, source_file, page, relevance_score}, ...]
+    # 证据链 [{content, source_file, page, relevance_score, graph_path?}, ...]
     sources: list[dict]
 
     # 短期记忆：当前会话上下文摘要
@@ -54,6 +54,17 @@ class AgentState(TypedDict):
 
     # Reflector 是否要求回退重做
     needs_revision: bool
+
+    # ── GraphRAG 扩展字段 ──────────────────────────────────
+
+    # Planner 判断是否需要图检索（关系类问题时为 True）
+    use_graph: bool
+
+    # Executor 收集的图路径上下文 [{content, graph_path, source_file, ...}, ...]
+    graph_context: list[dict]
+
+    # Planner/Executor 识别出的关键实体名称列表（供后续节点参考）
+    kg_entities: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -83,37 +94,26 @@ def build_graph() -> StateGraph:
 
     workflow = StateGraph(AgentState)
 
-    # 添加节点
     workflow.add_node("planner", planner_node)
     workflow.add_node("executor", executor_node)
     workflow.add_node("reflector", reflector_node)
     workflow.add_node("reporter", reporter_node)
 
-    # 边：START -> Planner -> Executor
     workflow.add_edge(START, "planner")
     workflow.add_edge("planner", "executor")
 
-    # 条件边：Executor 完成一步后判断是否继续
     workflow.add_conditional_edges(
         "executor",
         should_continue_execution,
-        {
-            "executor": "executor",
-            "reflector": "reflector",
-        },
+        {"executor": "executor", "reflector": "reflector"},
     )
 
-    # 条件边：Reflector 决定修正还是输出
     workflow.add_conditional_edges(
         "reflector",
         should_revise,
-        {
-            "executor": "executor",
-            "reporter": "reporter",
-        },
+        {"executor": "executor", "reporter": "reporter"},
     )
 
-    # Reporter -> END
     workflow.add_edge("reporter", END)
 
     return workflow.compile()

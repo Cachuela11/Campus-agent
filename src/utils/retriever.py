@@ -1,5 +1,5 @@
 """
-混合检索与重排序 —— Dense (ChromaDB) + BM25 + RRF + Cross-Encoder
+混合检索与重排序 —— Dense (ChromaDB) + BM25 + Graph + RRF + Cross-Encoder
 """
 
 from __future__ import annotations
@@ -29,8 +29,10 @@ _bm25_corpus: list[dict] | None = None
 
 _reranker: CrossEncoder | None = None
 
+_kg_graph = None  # networkx.DiGraph 单例
 
-# ── ChromaDB / Embedding 初始化 ────────────────────────────
+
+# ── ChromaDB / Embedding 初始化 ────────────────��───────────
 
 def _get_collection() -> chromadb.Collection:
     """获取或初始化 ChromaDB 集合（单例）"""
@@ -49,7 +51,7 @@ def _get_collection() -> chromadb.Collection:
 
 
 def _get_embeddings() -> HuggingFaceEmbeddings:
-    """获取 HuggingFace 本地 Embedding 模型（单例，首次调用自动下载）"""
+    """���取 HuggingFace 本地 Embedding 模型（单例，首次调用自动下载）"""
     global _embeddings
     if _embeddings is not None:
         return _embeddings
@@ -88,10 +90,6 @@ def _tokenize_chinese(text: str) -> list[str]:
 def _build_bm25_index(texts: list[str], corpus_meta: list[dict]) -> BM25Okapi:
     """
     构建 BM25 索引并持久化到磁盘。
-
-    Args:
-        texts: 文档内容列表
-        corpus_meta: 对应的元数据列表 [{"content", "source_file", "page"}, ...]
     """
     global _bm25_index, _bm25_corpus
 
@@ -109,10 +107,7 @@ def _build_bm25_index(texts: list[str], corpus_meta: list[dict]) -> BM25Okapi:
 
 
 def _load_bm25_index() -> BM25Okapi | None:
-    """
-    加载 BM25 索引。
-    优先级: 内存单例 > 磁盘 pickle > 从 ChromaDB 重建。
-    """
+    """加载 BM25 索引。优先级: 内存单例 > 磁盘 pickle > 从 ChromaDB 重建。"""
     global _bm25_index, _bm25_corpus
 
     if _bm25_index is not None:
@@ -120,7 +115,6 @@ def _load_bm25_index() -> BM25Okapi | None:
 
     bm25_path = os.getenv("BM25_INDEX_PATH", "./index/bm25_index.pkl")
 
-    # 尝试从 pickle 加载
     if Path(bm25_path).exists():
         try:
             with open(bm25_path, "rb") as f:
@@ -132,7 +126,6 @@ def _load_bm25_index() -> BM25Okapi | None:
         except Exception as e:
             print(f"[Retriever] BM25 pickle 加载失败，将从 ChromaDB 重建: {e}")
 
-    # 从 ChromaDB 重建
     collection = _get_collection()
     if collection.count() == 0:
         return None
@@ -151,7 +144,93 @@ def _load_bm25_index() -> BM25Okapi | None:
     return _build_bm25_index(texts, corpus_meta)
 
 
-# ── 双路检索 ──────────────────────────────────────────────
+# ── 知识图谱检索 ──────────────────────────────────────────
+
+def _get_knowledge_graph():
+    """获取知识图谱单例（延迟加载）"""
+    global _kg_graph
+    if _kg_graph is not None:
+        return _kg_graph
+    from src.utils.loader import load_knowledge_graph
+    _kg_graph = load_knowledge_graph()
+    return _kg_graph
+
+
+def _graph_search(query: str, top_k: int) -> list[dict]:
+    """
+    知识图谱路径检索：
+    1. 在图节点中找与 query 匹配的实体（子串 + jieba 分词匹配）
+    2. 展开 1-2 跳出入边，收集路径
+    3. 将边数据转换为统一文档格式返回
+    """
+    G = _get_knowledge_graph()
+    if G is None or G.number_of_nodes() == 0:
+        return []
+
+    query_lower = query.lower()
+    query_tokens = {t for t in _tokenize_chinese(query) if len(t) > 1}
+
+    # 步骤1: 实体匹配（子串优先，分词补充）
+    matched_nodes: list[str] = []
+    seen_nodes: set[str] = set()
+
+    for node in G.nodes():
+        node_str = str(node).lower()
+        if query_lower in node_str or node_str in query_lower:
+            if node not in seen_nodes:
+                matched_nodes.append(node)
+                seen_nodes.add(node)
+
+    if not matched_nodes:
+        for node in G.nodes():
+            node_str = str(node).lower()
+            if any(tok in node_str for tok in query_tokens):
+                if node not in seen_nodes:
+                    matched_nodes.append(node)
+                    seen_nodes.add(node)
+
+    if not matched_nodes:
+        return []
+
+    # 步骤2: 展开邻居（最多取5个匹配节点，各扩展1-2跳）
+    collected_edges: list[tuple] = []
+    seen_edges: set[tuple] = set()
+
+    for node in matched_nodes[:5]:
+        for u, v, data in list(G.out_edges(node, data=True)) + list(G.in_edges(node, data=True)):
+            key = (u, v, data.get("relation", ""))
+            if key not in seen_edges:
+                seen_edges.add(key)
+                collected_edges.append((u, v, data))
+
+        # 2跳：沿出边方向扩展
+        for _, neighbor in G.out_edges(node):
+            for u, v, data in G.out_edges(neighbor, data=True):
+                key = (u, v, data.get("relation", ""))
+                if key not in seen_edges:
+                    seen_edges.add(key)
+                    collected_edges.append((u, v, data))
+
+    # 步骤3: 转换为文档格式（与 Dense/BM25 输出结构一致）
+    results = []
+    for head, tail, data in collected_edges[: top_k * 2]:
+        relation = data.get("relation", "相关")
+        source_file = data.get("source_file", "unknown")
+        page = data.get("page", 0)
+        chunk_content = data.get("chunk_content", "")
+        content = f"[图谱] {head} --{relation}--> {tail}\n上下文: {chunk_content}"
+        results.append({
+            "content": content,
+            "source_file": source_file,
+            "page": page,
+            "relevance_score": 1.0,  # reranker 将覆盖此分数
+            "graph_path": f"{head} --{relation}--> {tail}",
+        })
+
+    return results[:top_k]
+
+
+# ── 双/三路检索 ────────────────────────────────────────────
 
 def _dense_search(query: str, top_k: int) -> list[dict]:
     """稠密向量检索（ChromaDB cosine）"""
@@ -210,9 +289,8 @@ def reciprocal_rank_fusion(
     results_lists: list[list[dict]], k: int = 60
 ) -> list[dict]:
     """
-    Reciprocal Rank Fusion: 合并多路检索结果。
-    RRF(d) = Σ 1 / (k + rank(d))  对每一路结果求和。
-    以文档 content 去重。
+    Reciprocal Rank Fusion: 合并多路检索结果（兼容 2 路或 3 路）。
+    RRF(d) = Σ 1 / (k + rank(d))，以文档 content 去重。
     """
     fused_scores: dict[str, float] = {}
     doc_map: dict[str, dict] = {}
@@ -235,7 +313,10 @@ def reciprocal_rank_fusion(
 # ── Cross-Encoder 重排序 ──────────────────────────────────
 
 def _rerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
-    """使用 Cross-Encoder 对候选文档重排序，返回 top_k 个最相关文档"""
+    """
+    使用 Cross-Encoder 对三路召回候选文档重排序，返回 top_k 个最相关文档。
+    graph_path 字段在排序后保留，不参与 pair 构造。
+    """
     if not candidates:
         return []
 
@@ -262,9 +343,8 @@ def get_index_count() -> int:
 
 def index_documents(data_dir: str = "./data", force: bool = False) -> int:
     """
-    从 data_dir 加载文档并建立向量索引 + BM25 索引。
-    如果索引已存在且 force=False，则跳过。
-    返回索引中的文档片段数量。
+    从 data_dir 加载文档并建立向量索引 + BM25 索引 + 知识图谱索引。
+    如果索引已存在且 force=False，则跳过。返回索引中的文档片段数量。
     """
     collection = _get_collection()
     existing = collection.count()
@@ -278,7 +358,6 @@ def index_documents(data_dir: str = "./data", force: bool = False) -> int:
         print("[Retriever] data 目录为空，跳过索引")
         return 0
 
-    # 强制重建时先清空旧数据
     if force and existing > 0:
         _chroma_client.delete_collection("campus_docs")
         globals()["_collection"] = None
@@ -294,7 +373,6 @@ def index_documents(data_dir: str = "./data", force: bool = False) -> int:
     ]
     ids = [f"doc_{i}" for i in range(len(docs))]
 
-    # 批量嵌入
     vectors = embeddings.embed_documents(texts)
 
     collection.upsert(
@@ -306,22 +384,33 @@ def index_documents(data_dir: str = "./data", force: bool = False) -> int:
 
     print(f"[Retriever] 已索引 {len(docs)} 个文档片段")
 
-    # 构建 BM25 索引
     corpus_meta = [
         {"content": d["content"], "source_file": d["source_file"], "page": d.get("page")}
         for d in docs
     ]
     _build_bm25_index(texts, corpus_meta)
 
+    # 构建知识图谱索引（仅首次或强制重建时执行）
+    kg_path = os.getenv("KG_INDEX_PATH", "./index/kg_graph.pkl")
+    if not Path(kg_path).exists() or force:
+        from src.utils.loader import build_knowledge_graph
+        build_knowledge_graph(docs, kg_path=kg_path)
+        global _kg_graph
+        _kg_graph = None  # 清除旧单例，下次检索时重新加载
+    else:
+        print("[Retriever] 知识图谱索引已存在，跳过重建。")
+
     return len(docs)
 
 
-def retrieve_documents(query: str, top_k: int = 5) -> list[dict]:
+def retrieve_documents(
+    query: str, top_k: int = 5, use_graph: bool = False
+) -> list[dict]:
     """
-    混合检索: Dense + BM25 → RRF 融合 → Cross-Encoder 重排序。
+    混合检索: Dense + BM25 [+ Graph] -> RRF 融合 -> Cross-Encoder 重排序。
     返回 top_k 个最相关文档片段。
 
-    返回格式: [{"content", "source_file", "page", "relevance_score"}, ...]
+    返回格式: [{"content", "source_file", "page", "relevance_score", "graph_path"?}, ...]
     """
     collection = _get_collection()
     if collection.count() == 0:
@@ -330,14 +419,18 @@ def retrieve_documents(query: str, top_k: int = 5) -> list[dict]:
     rrf_k = int(os.getenv("RRF_K", "60"))
     reranker_top_k = int(os.getenv("RERANKER_TOP_K", "20"))
 
-    # 1. 双路检索
     dense_results = _dense_search(query, top_k=reranker_top_k)
     bm25_results = _bm25_search(query, top_k=reranker_top_k)
 
-    # 2. RRF 融合
-    fused = reciprocal_rank_fusion([dense_results, bm25_results], k=rrf_k)
+    results_lists: list[list[dict]] = [dense_results, bm25_results]
 
-    # 3. Cross-Encoder 重排序
+    if use_graph:
+        graph_results = _graph_search(query, top_k=reranker_top_k)
+        if graph_results:
+            results_lists.append(graph_results)
+            print(f"[Retriever] 图路径召回: {len(graph_results)} 条")
+
+    fused = reciprocal_rank_fusion(results_lists, k=rrf_k)
     candidates = fused[:reranker_top_k]
     reranked = _rerank(query, candidates, top_k=top_k)
 

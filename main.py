@@ -58,6 +58,10 @@ def main() -> None:
             "long_term_memory": {},
             "response": "",
             "needs_revision": False,
+            # GraphRAG 扩展字段
+            "use_graph": False,
+            "graph_context": [],
+            "kg_entities": [],
         }
 
         try:
@@ -68,6 +72,9 @@ def main() -> None:
             print(result["response"])
             print("\n" + "-" * 50)
             print(f"引用来源: {len(result['sources'])} 个文档片段")
+            graph_hits = len([s for s in result["sources"] if s.get("graph_path")])
+            if graph_hits:
+                print(f"  其中图谱路径: {graph_hits} 条")
             print(f"执行步骤: {len(result['steps_results'])} 步")
             print("-" * 50 + "\n")
         except Exception as e:
