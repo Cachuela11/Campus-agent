@@ -13,16 +13,16 @@ flowchart TD
     Start([User Query]) --> Planner
 
     subgraph Harness["Harness Loop"]
-        Planner["Planner\n拆解问题 · 识别图检索"]
-        Executor["Executor\n检索+推理 · DeepResearch"]
-        Reflector["Reflector\n质量审查"]
-        Reporter["Reporter\n汇总输出"]
+        Planner["Planner"]
+        Executor["Executor"]
+        Reflector["Reflector"]
+        Reporter["Reporter"]
 
         Planner --> Executor
-        Executor -->|"current_step < len(plan)"| Executor
-        Executor -->|"current_step == len(plan)"| Reflector
-        Reflector -->|"needs_revision = True"| Executor
-        Reflector -->|"needs_revision = False"| Reporter
+        Executor -->|"Do subtask"| Executor
+        Executor -->|"Finished"| Reflector
+        Reflector -->|"needs_revision"| Executor
+        Reflector --> Reporter
     end
 
     Reporter --> End([Final Answer])
@@ -68,16 +68,16 @@ flowchart LR
 
 ### 组件总览
 
-| 组件 | 实现 |
-|------|------|
-| LLM | Ollama + Qwen2.5:7b（本地） |
-| Embedding | BAAI/bge-small-zh-v1.5 |
+| 组件 | 实现                                    |
+|------|---------------------------------------|
+| LLM | Ollama + Qwen2.5:7b（本地）               |
+| Embedding | BAAI/bge-small-zh-v1.5                |
 | Reranker | BAAI/bge-reranker-base（Cross-Encoder） |
-| 向量数据库 | ChromaDB（HNSW cosine） |
-| 稀疏检索 | BM25Okapi + jieba |
-| 知识图谱 | NetworkX DiGraph + LLM 批量三元组抽取 |
-| 工作流引擎 | LangGraph（硬编码拓扑） |
-| 记忆系统 | 短期（会���内 messages）+ 长期（JSON 持久化） |
+| 向量数据库 | ChromaDB（HNSW cosine）                 |
+| 稀疏检索 | BM25Okapi + jieba                     |
+| 知识图谱 | NetworkX DiGraph + LLM 批量三元组抽取        |
+| 工作流引擎 | LangGraph（硬编码拓扑）                      |
+| 记忆系统 | 短期（messages/context）+ 长期（DB+KG）       |
 
 ---
 
